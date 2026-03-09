@@ -10,6 +10,16 @@ conda create -n galtransl python=3.11 -y
 conda activate galtransl
 ```
 
+> 重要：執行任何 Python 腳本前，請先啟用 `galtransl` 環境，或使用單行命令
+> `conda activate galtransl && python <script.py>`。
+
+## 快速開始
+
+```bash
+conda activate galtransl && python export_script.py BSA/bsxx.dat -o translation
+conda activate galtransl && python import_script.py validate translation/script.json
+```
+
 ## 工具說明
 
 ### 1. BSA 解包工具 (`extract_bsa.py`)
@@ -17,7 +27,7 @@ conda activate galtransl
 從 BSA 檔案庫中解包所有檔案。
 
 ```bash
-python extract_bsa.py BSA/*.bsa -o BSA_extracted
+conda activate galtransl && python extract_bsa.py BSA/*.bsa -o BSA_extracted
 ```
 
 ### 2. BSG 圖片轉換工具 (`convert_bsg.py`)
@@ -25,7 +35,7 @@ python extract_bsa.py BSA/*.bsa -o BSA_extracted
 將 BSG 格式圖片轉換為 PNG 格式。
 
 ```bash
-python convert_bsg.py BSA_extracted/Graphics -o images_output
+conda activate galtransl && python convert_bsg.py BSA_extracted/Graphics -o images_output
 ```
 
 ### 3. 腳本文本導出工具 (`export_script.py`)
@@ -34,10 +44,10 @@ python convert_bsg.py BSA_extracted/Graphics -o images_output
 
 ```bash
 # 導出到單一 JSON 檔案
-python export_script.py BSA/bsxx.dat -o exported
+conda activate galtransl && python export_script.py BSA/bsxx.dat -o exported
 
 # 分類導出（按名稱、對話、其他分開）
-python export_script.py BSA/bsxx.dat -o exported -s
+conda activate galtransl && python export_script.py BSA/bsxx.dat -o exported -s
 ```
 
 **輸出格式：**
@@ -74,15 +84,15 @@ python export_script.py BSA/bsxx.dat -o exported -s
 
 ```bash
 # 驗證翻譯進度（預設顯示未翻譯的對話）
-python import_script.py validate translation/script.json
+conda activate galtransl && python import_script.py validate translation/script.json
 
 # 指定 context 類型過濾：dialog（預設）、name、other、all
-python import_script.py validate translation/script.json -c name
-python import_script.py validate translation/script.json -c all
+conda activate galtransl && python import_script.py validate translation/script.json -c name
+conda activate galtransl && python import_script.py validate translation/script.json -c all
 
 # 將未翻譯的條目匯出為 JSON 檔案，方便手動翻譯
-python import_script.py validate translation/script.json -c dialog -o untranslated_dialog.json
-python import_script.py validate translation/script.json -c name -o untranslated_names.json
+conda activate galtransl && python import_script.py validate translation/script.json -c dialog -o untranslated_dialog.json
+conda activate galtransl && python import_script.py validate translation/script.json -c name -o untranslated_names.json
 ```
 
 選項：
@@ -93,10 +103,10 @@ python import_script.py validate translation/script.json -c name -o untranslated
 
 ```bash
 # 導入翻譯（會自動備份原始檔案）
-python import_script.py import BSA/bsxx.dat translation/script.json -o BSA/bsxx_translated.dat
+conda activate galtransl && python import_script.py import BSA/bsxx.dat translation/script.json -o BSA/bsxx_translated.dat
 
 # 不創建備份
-python import_script.py import BSA/bsxx.dat translation/script.json --no-backup
+conda activate galtransl && python import_script.py import BSA/bsxx.dat translation/script.json --no-backup
 ```
 
 #### `check` - 檢查翻譯後檔案的結構完整性
@@ -104,7 +114,7 @@ python import_script.py import BSA/bsxx.dat translation/script.json --no-backup
 比對原始 `bsxx.dat` 與翻譯後的檔案，檢查導入過程中是否存在影響遊戲正常執行的結構性錯誤。
 
 ```bash
-python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
+conda activate galtransl && python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
 ```
 
 檢查項目：
@@ -112,10 +122,10 @@ python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
 | 項目 | 說明 |
 |------|------|
 | Magic & Header | 驗證檔案標識是否一致 |
-| 代碼區完整性 | 比對 0x00-0x68BC0 區域是否完全相同 |
-| Header 偏移量指標 | 驗證名稱字串表、對話索引表、對話字串表的偏移量順序正確且未超出範圍 |
-| 名稱索引表 | 逐一驗證 21 個角色名稱索引是否指向有效字串 |
-| 對話索引表 | 驗證 1344 個對話索引是否在有效範圍內，並抽樣讀取首尾各 5 條 |
+| 代碼區完整性 | 比對 code 區塊（檔頭定義的字串表之前區域）是否完全相同 |
+| Header 偏移量指標 | 驗證 name/dialog index/string 四個表的 offset/size 連續且在有效範圍內 |
+| 名稱索引表 | 依 header 計算名稱索引數量，逐一驗證索引是否指向有效字串 |
+| 對話索引表 | 依 header 計算對話索引數量，驗證索引是否在有效範圍內並抽樣檢查 |
 | 檔案大小 | 檢查大小差異是否在合理範圍內 |
 
 若所有檢查通過，程式回傳 exit code 0；若發現錯誤則回傳 1。
@@ -124,12 +134,12 @@ python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
 
 1. **解包遊戲資源**
    ```bash
-   python extract_bsa.py BSA/*.bsa -o BSA_extracted
+   conda activate galtransl && python extract_bsa.py BSA/*.bsa -o BSA_extracted
    ```
 
 2. **導出文本**
    ```bash
-   python export_script.py BSA/bsxx.dat -o translation
+   conda activate galtransl && python export_script.py BSA/bsxx.dat -o translation
    ```
 
 3. **翻譯** - 編輯 `translation/script.json`，在每個條目的 `translated` 欄位填入翻譯文本
@@ -137,23 +147,23 @@ python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
 4. **驗證翻譯**
    ```bash
    # 查看翻譯進度統計
-   python import_script.py validate translation/script.json
+   conda activate galtransl && python import_script.py validate translation/script.json
 
    # 匯出未翻譯的對話供手動翻譯
-   python import_script.py validate translation/script.json -c dialog -o untranslated_dialog.json
+   conda activate galtransl && python import_script.py validate translation/script.json -c dialog -o untranslated_dialog.json
 
    # 匯出未翻譯的角色名稱
-   python import_script.py validate translation/script.json -c name -o untranslated_names.json
+   conda activate galtransl && python import_script.py validate translation/script.json -c name -o untranslated_names.json
    ```
 
 5. **導入翻譯**
    ```bash
-   python import_script.py import BSA/bsxx.dat translation/script.json -o BSA/bsxx_translated.dat
+   conda activate galtransl && python import_script.py import BSA/bsxx.dat translation/script.json -o BSA/bsxx_translated.dat
    ```
 
 6. **檢查翻譯後的檔案結構**
    ```bash
-   python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
+   conda activate galtransl && python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
    ```
 
 ## 支援格式
@@ -171,15 +181,14 @@ python import_script.py check BSA/bsxx.dat.bak BSA/bsxx_translated.dat
 ### BSXScript 3.1 腳本格式
 - 簽名: `BSXScript 3.1`
 - 文本編碼: UTF-16LE
-- 檔案結構：
+- 檔案結構：name/dialog 的 index/string table 位置與大小由 header（0x88-0xA4）定義，實作上應以 header 動態讀取，避免硬編碼。
 
 | 區域 | 位置 | 說明 |
 |------|------|------|
-| 代碼區 | 0x00000 - 0x68BC0 | 遊戲指令（不可修改） |
-| 名稱索引表 | 0x68BC0 - 0x68C14 | 21 × 4 bytes 字元偏移量 |
-| 名稱字串表 | 0x68C20 - 0x68D0E | 21 個角色名稱 (UTF-16LE) |
-| 對話索引表 | 0x68D10 - 0x6A210 | 1344 × 4 bytes 字元偏移量 |
-| 對話字串表 | 0x6A210 - EOF | 對話文本 (UTF-16LE) |
+| Header | 0x0000 - ... | 包含 magic、version、section table 與 0x88-0xA4 表格指標 |
+| 代碼區 | ... | 遊戲指令區（導入時應保持 byte-for-byte 不變） |
+| Name Index/String Tables | 由 header 指定 | 名稱索引（uint32 字元偏移）與 UTF-16LE 字串表 |
+| Dialog Index/String Tables | 由 header 指定 | 對話索引（uint32 字元偏移）與 UTF-16LE 字串表 |
 
 ## 文件結構
 
