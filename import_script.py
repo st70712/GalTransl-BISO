@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-BSXScript 3.1 Text Importer for Bishop Engine Games (v2)
+BSXScript 3.1 Text Importer for Bishop Engine Games (v3)
 Imports translated text from JSON back into bsxx.dat
 
-正確處理以下結構：
-- 0x68BC0 - 0x68C14: 角色名稱索引表 (21 x 4 bytes)
-- 0x68C14 - 0x68C20: 填充區 (12 bytes)
-- 0x68C20 - 0x68D0E: 角色名稱字串表 (21 strings)
-- 0x68D10 - 0x6A210: 對話索引表 (1344 x 4 bytes)
-- 0x6A210 - EOF: 對話字串表
+動態讀取檔案 Header 來決定結構參數，不使用硬編碼常數。
 
-Header 中的偏移量：
-- 0x0090: 角色名稱字串表起始 (0x68C20)
-- 0x0098: 對話索引表起始 (0x68D10)
-- 0x00A0: 對話字串表起始 (0x6A210)
+Header 結構 (offset, size pairs):
+- 0x0080: 資料區起始偏移量
+- 0x0088/0x008C: 角色名稱索引表 (offset / size)
+- 0x0090/0x0094: 角色名稱字串表 (offset / size)
+- 0x0098/0x009C: 對話索引表 (offset / size)
+- 0x00A0/0x00A4: 對話字串表 (offset / size)
+
+所有表格連續排列，中間無間隙：
+  名稱索引表 → 名稱字串表 → 對話索引表 → 對話字串表
 
 Author: GalTransl-BGI Project
 """
@@ -26,39 +26,81 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 
-# 原始結構常數
-ORIG_NAME_INDEX_TABLE = 0x68BC0
-ORIG_NAME_STRING_TABLE = 0x68C20
-ORIG_DIALOG_INDEX_TABLE = 0x68D10
-ORIG_DIALOG_STRING_TABLE = 0x6A210
-
-NAME_COUNT = 21
-DIALOG_INDEX_COUNT = 1344
-
-# Header 中偏移量的位置
+# Header 中各欄位的位置
+HEADER_DATA_AREA_OFFSET = 0x80
+HEADER_NAME_INDEX_OFFSET = 0x88
+HEADER_NAME_INDEX_SIZE = 0x8C
 HEADER_NAME_STRING_OFFSET = 0x90
+HEADER_NAME_STRING_SIZE = 0x94
 HEADER_DIALOG_INDEX_OFFSET = 0x98
+HEADER_DIALOG_INDEX_SIZE = 0x9C
 HEADER_DIALOG_STRING_OFFSET = 0xA0
+HEADER_DIALOG_STRING_SIZE = 0xA4
 
 
-def load_translation(json_file: Path) -> Tuple[List[dict], List[dict]]:
+def read_file_structure(data: bytes) -> dict:
+    """
+    從檔案 Header 讀取實際結構參數。
+
+    Returns:
+        dict with keys:
+            name_index_offset, name_index_size, name_count,
+            name_string_offset, name_string_size,
+            dialog_index_offset, dialog_index_size, dialog_index_count,
+            dialog_string_offset, dialog_string_size
+    """
+    ni_off = struct.unpack_from('<I', data, HEADER_NAME_INDEX_OFFSET)[0]
+    ni_size = struct.unpack_from('<I', data, HEADER_NAME_INDEX_SIZE)[0]
+    ns_off = struct.unpack_from('<I', data, HEADER_NAME_STRING_OFFSET)[0]
+    ns_size = struct.unpack_from('<I', data, HEADER_NAME_STRING_SIZE)[0]
+    di_off = struct.unpack_from('<I', data, HEADER_DIALOG_INDEX_OFFSET)[0]
+    di_size = struct.unpack_from('<I', data, HEADER_DIALOG_INDEX_SIZE)[0]
+    ds_off = struct.unpack_from('<I', data, HEADER_DIALOG_STRING_OFFSET)[0]
+    ds_size = struct.unpack_from('<I', data, HEADER_DIALOG_STRING_SIZE)[0]
+
+    return {
+        'name_index_offset': ni_off,
+        'name_index_size': ni_size,
+        'name_count': ni_size // 4,
+        'name_string_offset': ns_off,
+        'name_string_size': ns_size,
+        'dialog_index_offset': di_off,
+        'dialog_index_size': di_size,
+        'dialog_index_count': di_size // 4,
+        'dialog_string_offset': ds_off,
+        'dialog_string_size': ds_size,
+    }
+
+
+def load_translation(json_file: Path, fs: dict) -> Tuple[List[dict], List[dict]]:
     """
     Load translation data from JSON file.
-    
+
+    根據原始檔案結構的實際偏移量來分類字串。
+
+    Args:
+        json_file: 翻譯 JSON 檔案路徑
+        fs: read_file_structure() 回傳的結構參數
+
     Returns:
         (name_entries, dialog_entries)
-        
+
     每個 entry 包含: index, offset, original, translated, context
     """
     with open(json_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     strings_data = data.get('strings', [])
-    
+
+    ns_off = fs['name_string_offset']
+    ns_end = ns_off + fs['name_string_size']
+    ds_off = fs['dialog_string_offset']
+    ds_end = ds_off + fs['dialog_string_size']
+
     # 分離名稱和對話
     name_entries = []
     dialog_entries = []
-    
+
     for s in strings_data:
         entry = {
             'index': s['index'],
@@ -67,72 +109,66 @@ def load_translation(json_file: Path) -> Tuple[List[dict], List[dict]]:
             'translated': s.get('translated', ''),
             'context': s.get('context', 'other')
         }
-        
-        # 根據偏移量分類 (更準確)
+
         offset = s['offset']
-        if ORIG_NAME_STRING_TABLE <= offset < ORIG_DIALOG_INDEX_TABLE:
-            # 角色名稱區域，但需要過濾掉索引值被誤認的情況
-            # 真正的名稱字串長度至少 >= 1 且不是單個控制字元
-            if len(s['original']) >= 1:
-                # 排除索引表被誤認的字串 (單字元且 ord < 0x100)
-                if len(s['original']) == 1 and ord(s['original'][0]) < 0x100:
-                    if offset >= ORIG_DIALOG_INDEX_TABLE - 0x10:
-                        # 可能是索引表的一部分，跳過
-                        continue
-                name_entries.append(entry)
-        elif offset >= ORIG_DIALOG_STRING_TABLE:
+        if ns_off <= offset < ns_end:
+            # 角色名稱字串區域
+            name_entries.append(entry)
+        elif ds_off <= offset < ds_end:
+            # 對話字串區域
             dialog_entries.append(entry)
-    
+        # else: 在索引表或其他區域的條目，跳過（可能是 export 掃描到的偽字串）
+
     # 確保排序
     name_entries.sort(key=lambda x: x['offset'])
     dialog_entries.sort(key=lambda x: x['offset'])
-    
+
     return name_entries, dialog_entries
 
 
 def build_name_string_table(entries: List[dict]) -> Tuple[bytes, List[int]]:
     """
     Build name string table.
-    
+
     Returns:
         (string_table_bytes, char_offsets)
     """
     strings = []
     char_offsets = []
     current_char_offset = 0
-    
+
     for entry in entries:
         text = entry['translated'] if entry['translated'] else entry['original']
         char_offsets.append(current_char_offset)
-        
+
         encoded = text.encode('utf-16le') + b'\x00\x00'
         strings.append(encoded)
-        
+
         current_char_offset += len(text) + 1  # +1 for null terminator
-    
+
     return b''.join(strings), char_offsets
 
 
 def build_dialog_string_table(entries: List[dict]) -> Tuple[bytes, List[int]]:
     """
     Build dialog string table.
-    
+
     Returns:
         (string_table_bytes, char_offsets)
     """
     strings = []
     char_offsets = []
     current_char_offset = 0
-    
+
     for entry in entries:
         text = entry['translated'] if entry['translated'] else entry['original']
         char_offsets.append(current_char_offset)
-        
+
         encoded = text.encode('utf-16le') + b'\x00\x00'
         strings.append(encoded)
-        
+
         current_char_offset += len(text) + 1  # +1 for null terminator
-    
+
     return b''.join(strings), char_offsets
 
 
@@ -140,6 +176,8 @@ def import_translation(original_file: Path, json_file: Path, output_file: Path,
                        backup: bool = True):
     """
     Import translated text back into the script file.
+
+    動態讀取原始檔案的 Header 來決定所有結構偏移量。
     """
     # Create backup
     if backup and original_file.exists():
@@ -147,116 +185,148 @@ def import_translation(original_file: Path, json_file: Path, output_file: Path,
         if not backup_file.exists():
             shutil.copy2(original_file, backup_file)
             print(f"Created backup: {backup_file}")
-    
+
     # Load original file
     with open(original_file, 'rb') as f:
         orig_data = f.read()
-    
-    # Load translation data
-    name_entries, dialog_entries = load_translation(json_file)
-    
-    print(f"Loaded translations:")
+
+    # 動態讀取檔案結構
+    fs = read_file_structure(orig_data)
+
+    print(f"Original file structure:")
+    print(f"  Name index table:  0x{fs['name_index_offset']:X} "
+          f"({fs['name_count']} entries, {fs['name_index_size']} bytes)")
+    print(f"  Name string table: 0x{fs['name_string_offset']:X} "
+          f"({fs['name_string_size']} bytes)")
+    print(f"  Dialog index table: 0x{fs['dialog_index_offset']:X} "
+          f"({fs['dialog_index_count']} entries, {fs['dialog_index_size']} bytes)")
+    print(f"  Dialog string table: 0x{fs['dialog_string_offset']:X} "
+          f"({fs['dialog_string_size']} bytes)")
+
+    # Load translation data (使用實際偏移量分類)
+    name_entries, dialog_entries = load_translation(json_file, fs)
+
+    print(f"\nLoaded translations:")
     print(f"  Name entries: {len(name_entries)}")
     print(f"  Dialog entries: {len(dialog_entries)}")
-    
+
     # Count translated
     name_translated = sum(1 for e in name_entries if e['translated'])
     dialog_translated = sum(1 for e in dialog_entries if e['translated'])
     print(f"  Translated names: {name_translated}/{len(name_entries)}")
     print(f"  Translated dialogs: {dialog_translated}/{len(dialog_entries)}")
-    
+
     # Build new string tables
     name_table, name_char_offsets = build_name_string_table(name_entries)
     dialog_table, dialog_char_offsets = build_dialog_string_table(dialog_entries)
-    
+
     print(f"\nNew string tables:")
     print(f"  Name table: {len(name_table)} bytes")
     print(f"  Dialog table: {len(dialog_table)} bytes")
-    
-    # 計算新的偏移量
-    # 名稱字串表仍從 0x68C20 開始
-    new_name_string_table = ORIG_NAME_STRING_TABLE
-    
-    # 計算名稱字串表結束位置，對齊到 0x10
-    name_table_end = new_name_string_table + len(name_table)
-    # 需要對齊並留出填充
-    padding_needed = (0x10 - (name_table_end % 0x10)) % 0x10
-    if padding_needed < 8:  # 確保至少 8 bytes 填充
-        padding_needed += 0x10
-    name_padding = b'\x00' * padding_needed
-    
-    # 新的對話索引表位置
-    new_dialog_index_table = name_table_end + len(name_padding)
-    
-    # 對話索引表大小 (保持不變)
-    dialog_index_table_size = DIALOG_INDEX_COUNT * 4
-    
-    # 新的對話字串表位置
-    new_dialog_string_table = new_dialog_index_table + dialog_index_table_size
-    
-    print(f"\nNew offsets:")
-    print(f"  Name string table: 0x{new_name_string_table:X}")
-    print(f"  Dialog index table: 0x{new_dialog_index_table:X}")
-    print(f"  Dialog string table: 0x{new_dialog_string_table:X}")
-    
-    # 開始建構新檔案
-    output = bytearray(orig_data[:ORIG_NAME_INDEX_TABLE])  # 保留 header 和 code
-    
-    # 1. 寫入角色名稱索引表 (21 x 4 bytes)
+
+    # ── 建構新檔案 ──────────────────────────────────────────
+
+    # 保留從檔案開頭到名稱索引表之前的所有資料（header + code）
+    orig_name_index_offset = fs['name_index_offset']
+    output = bytearray(orig_data[:orig_name_index_offset])
+
+    # 1. 重建名稱索引表
+    #    建立原始位元組偏移量 -> 新字元偏移量的映射
+    orig_name_byte_offsets = [e['offset'] for e in name_entries]
+    name_offset_map = dict(zip(orig_name_byte_offsets, name_char_offsets))
+
+    name_count = fs['name_count']
+    orig_ns_off = fs['name_string_offset']
+
     name_index_table = bytearray()
-    for i in range(NAME_COUNT):
-        if i < len(name_char_offsets):
-            name_index_table.extend(struct.pack('<I', name_char_offsets[i]))
+    for i in range(name_count):
+        orig_char_idx = struct.unpack_from('<I', orig_data,
+                                           orig_name_index_offset + i * 4)[0]
+        # 計算原始位元組偏移量
+        orig_byte_off = orig_ns_off + orig_char_idx * 2
+
+        if orig_byte_off in name_offset_map:
+            new_char_offset = name_offset_map[orig_byte_off]
         else:
-            name_index_table.extend(struct.pack('<I', 0))
-    
-    # 填充到 0x68C20 (12 bytes 填充)
-    name_index_padding = b'\x00' * (ORIG_NAME_STRING_TABLE - ORIG_NAME_INDEX_TABLE - len(name_index_table))
-    
+            # 保持原始字元偏移量（不應該發生，但作為安全措施）
+            new_char_offset = orig_char_idx
+        name_index_table.extend(struct.pack('<I', new_char_offset))
+
     output.extend(name_index_table)
-    output.extend(name_index_padding)
-    
-    # 2. 寫入名稱字串表
+
+    # 2. 名稱字串表（緊接名稱索引表之後，原始檔案中無間隙）
+    new_name_string_offset = len(output)
     output.extend(name_table)
-    
-    # 3. 填充對齊
-    output.extend(name_padding)
-    
-    # 4. 寫入對話索引表
-    # 讀取原始對話索引表並更新
+
+    # 3. 對話索引表
+    #    建立原始位元組偏移量 -> 新字元偏移量的映射
+    orig_dialog_byte_offsets = [e['offset'] for e in dialog_entries]
+    dialog_offset_map = dict(zip(orig_dialog_byte_offsets, dialog_char_offsets))
+
+    dialog_index_count = fs['dialog_index_count']
+    orig_di_off = fs['dialog_index_offset']
+    orig_ds_off = fs['dialog_string_offset']
+
+    new_dialog_index_offset = len(output)
     dialog_index_table = bytearray()
-    
-    # 建立原始偏移量到新字元偏移量的映射
-    orig_dialog_offsets = [e['offset'] for e in dialog_entries]
-    offset_to_new_char_offset = dict(zip(orig_dialog_offsets, dialog_char_offsets))
-    
-    for i in range(DIALOG_INDEX_COUNT):
-        orig_idx = struct.unpack_from('<I', orig_data, ORIG_DIALOG_INDEX_TABLE + i * 4)[0]
-        # 原始字元偏移量對應的位元組偏移量
-        orig_byte_offset = ORIG_DIALOG_STRING_TABLE + orig_idx * 2
-        
-        # 找到對應的新字元偏移量
-        if orig_byte_offset in offset_to_new_char_offset:
-            new_char_offset = offset_to_new_char_offset[orig_byte_offset]
-            dialog_index_table.extend(struct.pack('<I', new_char_offset))
+    unmapped_count = 0
+
+    for i in range(dialog_index_count):
+        orig_char_idx = struct.unpack_from('<I', orig_data,
+                                           orig_di_off + i * 4)[0]
+        # 計算原始位元組偏移量
+        orig_byte_off = orig_ds_off + orig_char_idx * 2
+
+        if orig_byte_off in dialog_offset_map:
+            new_char_offset = dialog_offset_map[orig_byte_off]
         else:
-            # 保持原始值（可能是最後一個特殊索引）
-            dialog_index_table.extend(struct.pack('<I', orig_idx))
-    
+            # 找不到映射 — 保持原始值
+            new_char_offset = orig_char_idx
+            unmapped_count += 1
+        dialog_index_table.extend(struct.pack('<I', new_char_offset))
+
     output.extend(dialog_index_table)
-    
-    # 5. 寫入對話字串表
+
+    if unmapped_count > 0:
+        print(f"\n  WARNING: {unmapped_count} dialog index entries could not be mapped")
+
+    # 4. 對話字串表
+    new_dialog_string_offset = len(output)
     output.extend(dialog_table)
-    
-    # 6. 更新 Header 中的偏移量
-    struct.pack_into('<I', output, HEADER_NAME_STRING_OFFSET, new_name_string_table)
-    struct.pack_into('<I', output, HEADER_DIALOG_INDEX_OFFSET, new_dialog_index_table)
-    struct.pack_into('<I', output, HEADER_DIALOG_STRING_OFFSET, new_dialog_string_table)
-    
+
+    # 5. 更新 Header 中的所有偏移量和大小
+
+    # 名稱索引表（位置不變，大小不變）
+    struct.pack_into('<I', output, HEADER_NAME_INDEX_OFFSET, orig_name_index_offset)
+    struct.pack_into('<I', output, HEADER_NAME_INDEX_SIZE, name_count * 4)
+
+    # 名稱字串表
+    struct.pack_into('<I', output, HEADER_NAME_STRING_OFFSET, new_name_string_offset)
+    struct.pack_into('<I', output, HEADER_NAME_STRING_SIZE, len(name_table))
+
+    # 對話索引表
+    struct.pack_into('<I', output, HEADER_DIALOG_INDEX_OFFSET, new_dialog_index_offset)
+    struct.pack_into('<I', output, HEADER_DIALOG_INDEX_SIZE, dialog_index_count * 4)
+
+    # 對話字串表
+    struct.pack_into('<I', output, HEADER_DIALOG_STRING_OFFSET, new_dialog_string_offset)
+    struct.pack_into('<I', output, HEADER_DIALOG_STRING_SIZE, len(dialog_table))
+
+    # 更新資料區起始偏移量 (0x80)
+    struct.pack_into('<I', output, HEADER_DATA_AREA_OFFSET, orig_name_index_offset)
+
+    print(f"\nNew offsets:")
+    print(f"  Name index table:   0x{orig_name_index_offset:X} ({name_count * 4} bytes)")
+    print(f"  Name string table:  0x{new_name_string_offset:X} ({len(name_table)} bytes)")
+    print(f"  Dialog index table: 0x{new_dialog_index_offset:X} "
+          f"({dialog_index_count * 4} bytes)")
+    print(f"  Dialog string table: 0x{new_dialog_string_offset:X} "
+          f"({len(dialog_table)} bytes)")
+
     # Write output file
     with open(output_file, 'wb') as f:
         f.write(output)
-    
+
     print(f"\nSuccessfully wrote: {output_file}")
     print(f"Original size: {len(orig_data)} bytes")
     print(f"New size: {len(output)} bytes")
@@ -358,6 +428,8 @@ def check_structure(original_file: Path, translated_file: Path):
     """
     比對原始 bsxx.dat 與翻譯後檔案，檢查結構性錯誤。
 
+    從兩個檔案的 Header 動態讀取結構參數。
+
     檢查項目：
       1. Magic Number 與 Header 完整性
       2. 代碼區是否被意外修改
@@ -370,6 +442,9 @@ def check_structure(original_file: Path, translated_file: Path):
         orig = f.read()
     with open(translated_file, 'rb') as f:
         trans = f.read()
+
+    orig_fs = read_file_structure(orig)
+    trans_fs = read_file_structure(trans)
 
     errors: List[str] = []
     warnings: List[str] = []
@@ -391,65 +466,92 @@ def check_structure(original_file: Path, translated_file: Path):
         print(f'  ✗ Magic 不一致！原始={orig_magic}  翻譯={trans_magic}')
 
     # ── 2. 代碼區完整性 ──────────────────────────────────────
-    print('\n【2. 代碼區完整性 (0x00000 - 0x68BC0)】')
-    code_end = ORIG_NAME_INDEX_TABLE
-    if orig[:code_end] == trans[:code_end]:
-        print(f'  ✓ 代碼區完全相同 ({code_end:,} bytes)')
+    # 代碼區 = 從檔案開頭到名稱索引表之前
+    code_end = orig_fs['name_index_offset']
+    trans_code_end = trans_fs['name_index_offset']
+
+    print(f'\n【2. 代碼區完整性 (0x00000 - 0x{code_end:X})】')
+
+    if code_end != trans_code_end:
+        errors.append(f'名稱索引表位置不同 (原始=0x{code_end:X} 翻譯=0x{trans_code_end:X})')
+        print(f'  ✗ 名稱索引表位置不同！原始=0x{code_end:X} 翻譯=0x{trans_code_end:X}')
     else:
-        diff_count = sum(1 for a, b in zip(orig[:code_end], trans[:code_end]) if a != b)
-        errors.append(f'代碼區有 {diff_count} bytes 不同')
-        print(f'  ✗ 代碼區有 {diff_count} bytes 不同！')
-        # 定位第一處差異
-        for i in range(code_end):
-            if orig[i] != trans[i]:
-                print(f'     第一處差異位於 0x{i:05X}: '
-                      f'原始=0x{orig[i]:02X} 翻譯=0x{trans[i]:02X}')
-                break
+        # 排除 header 偏移量欄位 (0x80-0xA7) 的差異，因為這些是預期會變更的
+        header_region = set(range(0x80, 0xA8))
+        diff_count = 0
+        first_diff = None
+
+        for i in range(min(code_end, len(trans))):
+            if i in header_region:
+                continue
+            if i < len(orig) and i < len(trans) and orig[i] != trans[i]:
+                diff_count += 1
+                if first_diff is None:
+                    first_diff = i
+
+        if diff_count == 0:
+            print(f'  ✓ 代碼區完全相同 ({code_end:,} bytes，排除 header 偏移量欄位)')
+        else:
+            errors.append(f'代碼區有 {diff_count} bytes 不同 (排除 header)')
+            print(f'  ✗ 代碼區有 {diff_count} bytes 不同！')
+            if first_diff is not None:
+                print(f'     第一處差異位於 0x{first_diff:05X}: '
+                      f'原始=0x{orig[first_diff]:02X} 翻譯=0x{trans[first_diff]:02X}')
 
     # ── 3. Header 偏移量指標 ──────────────────────────────────
     print('\n【3. Header 偏移量指標】')
     ptr_defs = [
-        (HEADER_NAME_STRING_OFFSET, '名稱字串表'),
-        (HEADER_DIALOG_INDEX_OFFSET, '對話索引表'),
-        (HEADER_DIALOG_STRING_OFFSET, '對話字串表'),
+        (HEADER_NAME_INDEX_OFFSET, HEADER_NAME_INDEX_SIZE, '名稱索引表'),
+        (HEADER_NAME_STRING_OFFSET, HEADER_NAME_STRING_SIZE, '名稱字串表'),
+        (HEADER_DIALOG_INDEX_OFFSET, HEADER_DIALOG_INDEX_SIZE, '對話索引表'),
+        (HEADER_DIALOG_STRING_OFFSET, HEADER_DIALOG_STRING_SIZE, '對話字串表'),
     ]
-    trans_ptrs = {}
-    for ptr_off, label in ptr_defs:
+    for ptr_off, size_off, label in ptr_defs:
         orig_val = struct.unpack_from('<I', orig, ptr_off)[0]
         trans_val = struct.unpack_from('<I', trans, ptr_off)[0]
-        trans_ptrs[label] = trans_val
-        ok = trans_val < len(trans)
+        orig_sz = struct.unpack_from('<I', orig, size_off)[0]
+        trans_sz = struct.unpack_from('<I', trans, size_off)[0]
+        ok = trans_val < len(trans) and (trans_val + trans_sz) <= len(trans)
         status = '✓' if ok else '✗ 超出檔案範圍!'
         if not ok:
-            errors.append(f'{label}偏移量 0x{trans_val:X} 超出檔案範圍')
-        print(f'  {status} 0x{ptr_off:02X} {label}: '
-              f'原始=0x{orig_val:05X}  翻譯=0x{trans_val:05X}')
+            errors.append(f'{label}偏移量 0x{trans_val:X}+{trans_sz} 超出檔案範圍')
+        print(f'  {status} {label}: '
+              f'原始=0x{orig_val:05X}({orig_sz:,}B)  '
+              f'翻譯=0x{trans_val:05X}({trans_sz:,}B)')
 
-    name_str_off = trans_ptrs['名稱字串表']
-    dialog_idx_off = trans_ptrs['對話索引表']
-    dialog_str_off = trans_ptrs['對話字串表']
+    name_idx_off = trans_fs['name_index_offset']
+    name_str_off = trans_fs['name_string_offset']
+    dialog_idx_off = trans_fs['dialog_index_offset']
+    dialog_str_off = trans_fs['dialog_string_offset']
 
     # 偏移量順序必須遞增
-    if not (name_str_off < dialog_idx_off < dialog_str_off):
-        errors.append('偏移量順序錯誤 (應為 名稱字串 < 對話索引 < 對話字串)')
+    if not (name_idx_off <= name_str_off <= dialog_idx_off <= dialog_str_off):
+        errors.append('偏移量順序錯誤')
         print('  ✗ 偏移量順序錯誤！')
     else:
-        print('  ✓ 偏移量順序正確 (名稱字串 < 對話索引 < 對話字串)')
+        print('  ✓ 偏移量順序正確 (名稱索引 ≤ 名稱字串 ≤ 對話索引 ≤ 對話字串)')
 
     # ── 4. 名稱索引表 ────────────────────────────────────────
     print('\n【4. 名稱索引表】')
-    # 找出名稱索引表位置 (在翻譯檔案中仍然是 0x68BC0)
-    name_idx_base = ORIG_NAME_INDEX_TABLE
-    name_str_base = name_str_off
+    name_count = trans_fs['name_count']
+    name_str_size = trans_fs['name_string_size']
 
-    # 計算名稱字串表結束位置 (= 對話索引表起始前的填充開始)
-    name_str_region_end = dialog_idx_off
+    if name_count != orig_fs['name_count']:
+        warnings.append(f'名稱數量不同: 原始={orig_fs["name_count"]} 翻譯={name_count}')
+        print(f'  ⚠ 名稱數量: {name_count} (原始 {orig_fs["name_count"]})')
+    else:
+        print(f'  ✓ 名稱數量: {name_count}')
 
     name_ok = True
-    for i in range(NAME_COUNT):
-        char_idx = struct.unpack_from('<I', trans, name_idx_base + i * 4)[0]
-        byte_off = name_str_base + char_idx * 2
-        if byte_off >= name_str_region_end:
+    for i in range(name_count):
+        idx_pos = name_idx_off + i * 4
+        if idx_pos + 4 > len(trans):
+            errors.append(f'名稱索引 [{i}] 超出檔案範圍')
+            name_ok = False
+            continue
+        char_idx = struct.unpack_from('<I', trans, idx_pos)[0]
+        byte_off = name_str_off + char_idx * 2
+        if byte_off >= name_str_off + name_str_size:
             errors.append(f'名稱索引 [{i}] 字元偏移={char_idx} 超出名稱字串區域')
             print(f'  ✗ 索引 [{i:2d}] 偏移={char_idx:3d} → 0x{byte_off:05X} 超出範圍!')
             name_ok = False
@@ -462,29 +564,36 @@ def check_structure(original_file: Path, translated_file: Path):
             else:
                 print(f'  ✓ 索引 [{i:2d}] 偏移={char_idx:3d} → "{name}"')
     if name_ok:
-        print(f'  ── {NAME_COUNT} 個名稱索引全部正確')
+        print(f'  ── {name_count} 個名稱索引全部正確')
 
     # ── 5. 對話索引表 ────────────────────────────────────────
     print('\n【5. 對話索引表】')
-    dialog_idx_count = (dialog_str_off - dialog_idx_off) // 4
-    dialog_str_end = len(trans)
+    dialog_idx_count = trans_fs['dialog_index_count']
+    dialog_str_size = trans_fs['dialog_string_size']
+    dialog_str_end = dialog_str_off + dialog_str_size
 
-    if dialog_idx_count != DIALOG_INDEX_COUNT:
-        warnings.append(f'對話索引數量 {dialog_idx_count} != 預期 {DIALOG_INDEX_COUNT}')
-        print(f'  ⚠ 索引數量: {dialog_idx_count} (預期 {DIALOG_INDEX_COUNT})')
+    if dialog_idx_count != orig_fs['dialog_index_count']:
+        warnings.append(f'對話索引數量不同: 原始={orig_fs["dialog_index_count"]} '
+                        f'翻譯={dialog_idx_count}')
+        print(f'  ⚠ 索引數量: {dialog_idx_count} '
+              f'(原始 {orig_fs["dialog_index_count"]})')
     else:
         print(f'  ✓ 索引數量: {dialog_idx_count}')
 
     invalid_idx = 0
     max_char_idx = 0
     for i in range(dialog_idx_count):
-        char_idx = struct.unpack_from('<I', trans, dialog_idx_off + i * 4)[0]
+        idx_pos = dialog_idx_off + i * 4
+        if idx_pos + 4 > len(trans):
+            invalid_idx += 1
+            continue
+        char_idx = struct.unpack_from('<I', trans, idx_pos)[0]
         byte_off = dialog_str_off + char_idx * 2
         if char_idx > max_char_idx:
             max_char_idx = char_idx
         if byte_off >= dialog_str_end:
             invalid_idx += 1
-            if invalid_idx <= 3:  # 只印前三個
+            if invalid_idx <= 3:
                 print(f'  ✗ 索引 [{i}] 偏移={char_idx} → 0x{byte_off:05X} 超出範圍!')
 
     if invalid_idx > 0:
@@ -501,7 +610,12 @@ def check_structure(original_file: Path, translated_file: Path):
     sample_indices = sorted(set(sample_indices))
     sample_ok = True
     for i in sample_indices:
-        char_idx = struct.unpack_from('<I', trans, dialog_idx_off + i * 4)[0]
+        idx_pos = dialog_idx_off + i * 4
+        if idx_pos + 4 > len(trans):
+            sample_ok = False
+            print(f'    [{i:4d}] (索引位置超出範圍)')
+            continue
+        char_idx = struct.unpack_from('<I', trans, idx_pos)[0]
         byte_off = dialog_str_off + char_idx * 2
         if byte_off < dialog_str_end:
             text = _read_utf16le_string(trans, byte_off)
@@ -554,9 +668,9 @@ def main():
     parser = argparse.ArgumentParser(
         description='Import translated text into BSXScript 3.1 files'
     )
-    
+
     subparsers = parser.add_subparsers(dest='command', help='Commands')
-    
+
     # Import command
     import_parser = subparsers.add_parser('import', help='Import translations')
     import_parser.add_argument('original', type=Path, help='Original bsxx.dat file')
@@ -565,7 +679,7 @@ def main():
                                help='Output file (default: overwrite original)')
     import_parser.add_argument('--no-backup', action='store_true',
                                help='Do not create backup')
-    
+
     # Validate command
     validate_parser = subparsers.add_parser('validate', help='Validate translation file')
     validate_parser.add_argument('json', type=Path, help='Translation JSON file')
@@ -574,7 +688,7 @@ def main():
                                  help='Context type to filter (default: dialog)')
     validate_parser.add_argument('-o', '--output', type=Path, default=None,
                                  help='Output untranslated entries to JSON file')
-    
+
     # Check command
     check_parser = subparsers.add_parser(
         'check', help='Check translated file for structural errors')
@@ -582,12 +696,12 @@ def main():
                               help='Original bsxx.dat file')
     check_parser.add_argument('translated', type=Path,
                               help='Translated bsxx.dat file')
-    
+
     args = parser.parse_args()
-    
+
     if args.command == 'import':
         output = args.output or args.original
-        import_translation(args.original, args.json, output, 
+        import_translation(args.original, args.json, output,
                           backup=not args.no_backup)
     elif args.command == 'validate':
         validate_translation(args.json, context_filter=args.context,
